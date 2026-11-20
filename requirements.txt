@@ -1,0 +1,3 @@
+PySide6-Essentials>=6.5
+# Codex may zstd-compress request bodies; needed to apply preset overrides to them.
+zstandard>=0.22; python_version < "3.14"

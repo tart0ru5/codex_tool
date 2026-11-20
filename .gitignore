@@ -1,0 +1,37 @@
+# ---- Secrets ----
+# API keys of the proxy presets (written by cct/settings.py)
+.env
+.env.*
+笔记.txt
+
+# ---- Runtime data ----
+# Proxy request/response logs (contain full conversation contents)
+logs/
+debug.log
+# Temp file left by Settings.save() if a write is interrupted
+config.json.tmp
+# config.json holds this machine's settings (proxy presets, injection state).
+# It contains no keys and is tracked; uncomment to keep it local instead.
+config.json
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
