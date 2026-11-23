@@ -21,7 +21,12 @@ from .qt import (
     EXTENDED_SELECTION,
     QColor,
     QDialog,
+    QLabel,
+    QListWidget,
     QListWidgetItem,
+    QPushButton,
+    Qt,
+    QVBoxLayout,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -38,6 +43,13 @@ from .settings import Settings, display_path
 from .render import entry_kind, entry_preview, is_tool_record, json_dump, render_segments
 
 ROLE_COLORS = {"user": "#1f6feb", "assistant": "#8957e5"}
+COMMON_RECORD_KINDS = {
+    "session_meta", "turn_context", "developer", "reasoning",
+    "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output",
+    "event:user_message", "event:agent_message", "event:agent_reasoning",
+    "event:task_started", "event:task_complete", "event:token_count",
+    "event:item_started", "event:item_completed",
+}
 SESSION_ID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
 
 
@@ -52,6 +64,8 @@ class MainWindow(QMainWindow):
         self.config = CodexConfig()
         self.settings = Settings()
         self.settings.load()
+        stored = self.settings.data.get("hiddenEntryKinds", [])
+        self.hidden_kinds = {k for k in stored if isinstance(k, str)} if isinstance(stored, list) else set()
         self.exchange_log = ExchangeLog(self.settings.log_dir, self.settings.log_keep)
         self.proxy_server = ProxyServer(self.exchange_log)
         self.shown_log: tuple | None = None
@@ -106,6 +120,8 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self.prompt_panel = PromptPanel(load=lambda: self.settings.prompts, save=self.save_prompts)
+        filter_action = self.center_panel.more_menu.addAction("聊天记录显示项目…")
+        filter_action.triggered.connect(self.open_record_filter)
         self.right_panel = RightPanel(
             on_save=self.save_current,
             on_page_changed=self.right_page_changed,
@@ -548,7 +564,46 @@ class MainWindow(QMainWindow):
         self.reload_list()
         self.status.setText(f"Loaded {path} ({len(doc.entries)} entries)")
 
+    def open_record_filter(self) -> None:
+        if not self.apply_raw_edit():
+            return
+        kinds = COMMON_RECORD_KINDS | self.hidden_kinds
+        if self.doc:
+            kinds.update(entry_kind(entry.obj) for entry in self.doc.entries)
+        kinds.difference_update(ROLE_COLORS)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("聊天记录显示项目")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("勾选要显示的条目类型"))
+        choices = QListWidget()
+        layout.addWidget(choices)
+        for kind in sorted(kinds):
+            item = QListWidgetItem(kind)
+            item.setCheckState(Qt.CheckState.Unchecked if kind in self.hidden_kinds else Qt.CheckState.Checked)
+            choices.addItem(item)
+
+        def toggle(item: QListWidgetItem) -> None:
+            if item.checkState() == Qt.CheckState.Checked:
+                self.hidden_kinds.discard(item.text())
+            else:
+                self.hidden_kinds.add(item.text())
+            self.reload_list(self.shown_row or 0)
+            if not self.settings.load_error:
+                self.settings.data["hiddenEntryKinds"] = sorted(self.hidden_kinds)
+                try:
+                    self.settings.save()
+                except OSError as exc:
+                    self.status.setText(f"无法保存聊天记录显示设置：{exc}")
+
+        choices.itemChanged.connect(toggle)
+        close = QPushButton("关闭")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.resize(380, 420)
+        dialog.exec()
+
     def reload_list(self, select_row: int = 0) -> None:
+        self.anchor_row = None
         self.list.clear()
         self.shown_row = None
         self.rendered.clear()
@@ -563,10 +618,23 @@ class MainWindow(QMainWindow):
             if color:
                 item.setForeground(QColor(color))
             self.list.addItem(item)
-        if self.doc.entries:
-            row = min(max(select_row, 0), len(self.doc.entries) - 1)
+            item.setHidden(entry_kind(entry.obj) in self.hidden_kinds)
+        self.select_visible_row(select_row)
+
+    def select_visible_row(self, preferred: int) -> None:
+        visible = (i for i in range(self.list.count()) if not self.list.item(i).isHidden())
+        row = None
+        for row in visible:
+            if row >= preferred:
+                break
+        if row is not None:
             self.list.setCurrentRow(row)
             self.show_entry(row)
+        else:
+            self.list.setCurrentRow(-1)
+            self.shown_row = None
+            self.rendered.clear()
+            self.raw.clear()
 
     @staticmethod
     def list_label(index: int, entry: Entry) -> str:
@@ -606,6 +674,9 @@ class MainWindow(QMainWindow):
             self.dirty = True
             self.list.item(self.shown_row).setText(self.list_label(self.shown_row, entry))
             self.rendered.show_segments(render_segments(self.shown_row, entry.line, obj))
+            if entry_kind(obj) in self.hidden_kinds:
+                self.list.item(self.shown_row).setHidden(True)
+                self.select_visible_row(self.shown_row)
         return True
 
     def item_clicked(self, item: QListWidgetItem) -> None:
@@ -646,13 +717,14 @@ class MainWindow(QMainWindow):
         start, end = sorted([self.anchor_row, row])
         self.list.clearSelection()
         for index in range(start, end + 1):
-            self.list.item(index).setSelected(True)
+            if not self.list.item(index).isHidden():
+                self.list.item(index).setSelected(True)
         self.anchor_row = None
         self.status.setText(f"Selected {start + 1}..{end + 1}")
 
     def selected_rows(self) -> list[int]:
-        rows = {self.list.row(item) for item in self.list.selectedItems()}
-        if not rows and self.list.currentRow() >= 0:
+        rows = {self.list.row(item) for item in self.list.selectedItems() if not item.isHidden()}
+        if not rows and self.list.currentItem() and not self.list.currentItem().isHidden():
             rows = {self.list.currentRow()}
         return sorted(rows)
 
@@ -724,6 +796,8 @@ class MainWindow(QMainWindow):
         needle = query.lower()
         for offset in range(count):
             row = (start + offset) % count
+            if self.list.item(row).isHidden():
+                continue
             haystack = self.list.item(row).text() + "\n" + json_dump(self.doc.entries[row].obj)
             if needle in haystack.lower():
                 self.list.setCurrentRow(row)
@@ -751,8 +825,7 @@ class MainWindow(QMainWindow):
         path, row = self.doc.path, self.list.currentRow()
         self.open_file(path, force=True)
         if 0 <= row < self.list.count():
-            self.list.setCurrentRow(row)
-            self.show_entry(row)
+            self.select_visible_row(row)
         self.status.setText(f"Reloaded external changes: {path}")
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt override
